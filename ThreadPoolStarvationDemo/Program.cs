@@ -13,7 +13,7 @@ namespace ThreadPoolStarvationDemo
         private static readonly TimeSpan WorkMethodDuration = TimeSpan.FromMilliseconds(100);
         private static readonly TimeSpan GarbageMethodDuration = TimeSpan.FromMilliseconds(1000);
 
-        private static long CyclesToPassToMatchWorkMethodDuration;
+        private const long CyclesToPassToMatchWorkMethodDuration = 10000000; // it should be something about 100 msec, but depends on the CPU
 
         private static volatile int NumberOfRequestsExecuting;
         private static volatile int NumberOfWorkMethodsExecuting;
@@ -44,51 +44,38 @@ namespace ThreadPoolStarvationDemo
             ThreadPool.GetMaxThreads(out maxWorkerThreads, out maxCompletionThreads);
             Console.WriteLine("Worker threads: {0} - {1}; Completion Port threads: {2} - {3}", minWorkerThreads, maxWorkerThreads, minCompletionThreads, maxCompletionThreads);
 
-            Calibrate();
-
-            const int requestsPerSecond = 20;
+            const int requestsPerSecond = 50;
             var requestInterval = TimeSpan.FromSeconds(1.0 / requestsPerSecond);
 
             var statisticsStopwatch = Stopwatch.StartNew();
             var statisticsInterval = TimeSpan.FromSeconds(5);
 
-            var iterations = (int)(CyclesToPassToMatchWorkMethodDuration / (WorkMethodDuration.TotalMilliseconds / requestInterval.TotalMilliseconds));
+            var requestStopwatch = Stopwatch.StartNew();
+            var mainStopwatch = Stopwatch.StartNew();
             while (true)
             {
+                Thread.SpinWait(100000);
+
+                if (requestStopwatch.Elapsed < requestInterval)
+                {
+                    continue;
+                }
+                requestStopwatch.Restart();
+
                 SendRequest();
                 RequestsSent++;
-
-//                Thread.Sleep(requestInterval);
-                Thread.SpinWait(iterations);
 
                 var elapsed = statisticsStopwatch.Elapsed;
                 if (elapsed > statisticsInterval)
                 {
-                    ReportStatistics(elapsed);
-
                     statisticsStopwatch.Restart();
+
+                    ReportStatistics(elapsed, mainStopwatch.Elapsed);
                 }
             }
         }
 
-        private static void Calibrate()
-        {
-            // warm up
-            Thread.SpinWait(100);
-
-            var sw = Stopwatch.StartNew();
-
-            var iterations = 0L;
-            do
-            {
-                Thread.SpinWait(100);
-                iterations += 100L;
-            } while (sw.Elapsed < WorkMethodDuration);
-
-            CyclesToPassToMatchWorkMethodDuration = iterations;
-        }
-
-        private static void ReportStatistics(TimeSpan elapsed)
+        private static void ReportStatistics(TimeSpan elapsed, TimeSpan total)
         {
             var requestsCompleted = RequestsCompleted;
             var requestsCompletedFromLastReport = requestsCompleted - LastCompletedRequests;
@@ -98,7 +85,10 @@ namespace ThreadPoolStarvationDemo
             var garbageCompletedFromLastReport = garbageCompleted - LastGarbageCompleted;
             var garbageThroughput = garbageCompletedFromLastReport/elapsed.TotalSeconds;
 
+            var meanThroughput = RequestsCompleted/total.TotalSeconds;
+
             Console.WriteLine();
+            Console.WriteLine("Mean Throughput: {0:F2}", meanThroughput);
             Console.WriteLine("Throughput: {0:F2}, Logs per second: {1:F2}", throughput, garbageThroughput);
             Console.WriteLine("In Progress: Requests = {0}, Work = {1}, Garbage = {2}", NumberOfRequestsExecuting, NumberOfWorkMethodsExecuting, NumberOfGarbageMethodsExecuting);
             //Console.WriteLine("Requests completed: {0}, Logs completed: {1}", requestsCompleted, garbageCompleted);
@@ -111,16 +101,22 @@ namespace ThreadPoolStarvationDemo
 
         private static void InvokeGarbageMethod(Action spendTime)
         {
-            //spendTime();
-            var queued = ThreadPool.QueueUserWorkItem(_ => spendTime());
-            Debug.Assert(queued, "queued");
+            spendTime();
+            //var queued = ThreadPool.QueueUserWorkItem(_ => spendTime());
+            //if (!queued)
+            //{
+            //    throw new InvalidOperationException();
+            //}
         }
 
         private static void SendRequest()
         {
             var queued = ThreadPool.QueueUserWorkItem(_ => DoRequest());
 
-            Debug.Assert(queued, "queued");
+            if (!queued)
+            {
+                throw new InvalidOperationException();
+            }
         }
 
         private static void DoRequest()
